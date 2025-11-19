@@ -1,0 +1,665 @@
+import React, { useState, useEffect } from 'react';
+import {
+  View,
+  Text,
+  StyleSheet,
+  ScrollView,
+  TouchableOpacity,
+  TextInput,
+  Alert,
+  ActivityIndicator,
+  RefreshControl,
+  Platform
+} from 'react-native';
+import { useRouter } from 'expo-router';
+import { useTheme } from '../../contexts/ThemeContext';
+import { useAuth } from '../../contexts/AuthContext';
+import { Ionicons } from '@expo/vector-icons';
+import api from '../../utils/api';
+
+
+interface OverdueRecord {
+  id: string;
+  member_id: string;
+  member_name: string;
+  email: string;
+  overdue_type: string;
+  due_amount: number;
+  due_date: string;
+  overdue_since: string;
+  days_overdue: number;
+  status: string;
+  reference_id?: string;
+  last_reminder_sent?: string;
+  reminder_count: number;
+}
+
+interface OverdueStats {
+  total_overdue_members: number;
+  total_overdue_amount: number;
+  longest_overdue_days: number;
+  recently_cleared_count: number;
+  overdue_by_type: { [key: string]: number };
+}
+
+export default function AdminOverdueManagement() {
+  const router = useRouter();
+  const { colors } = useTheme();
+  const { user } = useAuth();
+
+  const [overdues, setOverdues] = useState<OverdueRecord[]>([]);
+  const [filteredOverdues, setFilteredOverdues] = useState<OverdueRecord[]>([]);
+  const [stats, setStats] = useState<OverdueStats | null>(null);
+  const [loading, setLoading] = useState(true);
+  const [refreshing, setRefreshing] = useState(false);
+  
+  // Filters
+  const [searchQuery, setSearchQuery] = useState('');
+  const [filterType, setFilterType] = useState('all');
+  const [sendingReminder, setSendingReminder] = useState<string | null>(null);
+  const [markingCleared, setMarkingCleared] = useState<string | null>(null);
+
+  useEffect(() => {
+    if (user?.role !== 'admin') {
+      Alert.alert('Access Denied', 'Admin access required');
+      router.back();
+      return;
+    }
+    loadData();
+  }, []);
+
+  useEffect(() => {
+    applyFilters();
+  }, [searchQuery, filterType, overdues]);
+
+  const loadData = async () => {
+    try {
+      const response = await api.get('/api/contributions/overdue/unified');
+      
+      // Transform unified response to match existing interface
+      const allOverdues = response.data.all_overdues.map((item: any, index: number) => ({
+        id: `${item.type}_${index}`,
+        member_id: item.member_id || item.subscription_id || item.request_id || '',
+        member_name: item.member_name || item.user_email || '',
+        email: item.email || item.user_email || '',
+        overdue_type: item.type,
+        due_amount: item.amount_due || item.amount || 0,
+        due_date: item.due_date || item.end_date || item.request_date || '',
+        overdue_since: item.due_date || item.end_date || item.request_date || '',
+        days_overdue: item.days_overdue || item.days_pending || 0,
+        status: 'Overdue',
+        reference_id: item.member_id || item.subscription_id || '',
+        last_reminder_sent: null,
+        reminder_count: 0
+      }));
+      
+      setOverdues(allOverdues);
+      setStats({
+        total_overdue_members: response.data.stats.total_overdues,
+        total_overdue_amount: response.data.stats.total_amount_due,
+        longest_overdue_days: Math.max(...allOverdues.map((o: any) => o.days_overdue), 0),
+        recently_cleared_count: 0,
+        overdue_by_type: {
+          welfare_contribution: response.data.stats.welfare_count,
+          subscription_plan: response.data.stats.subscription_count,
+          educational_support: response.data.stats.educational_count
+        }
+      });
+    } catch (error) {
+      console.error('Error loading data:', error);
+      Alert.alert('Error', 'Failed to load overdue data');
+    } finally {
+      setLoading(false);
+      setRefreshing(false);
+    }
+  };
+
+  const onRefresh = () => {
+    setRefreshing(true);
+    loadData();
+  };
+
+  const applyFilters = () => {
+    let filtered = overdues;
+
+    // Search filter
+    if (searchQuery.trim()) {
+      filtered = filtered.filter(o =>
+        o.member_name.toLowerCase().includes(searchQuery.toLowerCase()) ||
+        o.member_id.toLowerCase().includes(searchQuery.toLowerCase()) ||
+        o.email.toLowerCase().includes(searchQuery.toLowerCase())
+      );
+    }
+
+    // Type filter
+    if (filterType !== 'all') {
+      filtered = filtered.filter(o => o.overdue_type === filterType);
+    }
+
+    setFilteredOverdues(filtered);
+  };
+
+  const sendReminder = async (overdueId: string, memberName: string) => {
+    Alert.alert(
+      'Send Reminder',
+      `Send payment reminder to ${memberName}?`,
+      [
+        { text: 'Cancel', style: 'cancel' },
+        {
+          text: 'Send',
+          onPress: async () => {
+            try {
+              setSendingReminder(overdueId);
+              const token = user?.token;
+              
+              await axios.post(
+                `${BACKEND_URL}/api/overdue/admin/send-reminder/${overdueId}`,
+                {},
+                { headers: { Authorization: `Bearer ${token}` } }
+              );
+
+              Alert.alert('Success', 'Reminder sent successfully');
+              await loadData();
+            } catch (error: any) {
+              console.error('Error sending reminder:', error);
+              Alert.alert('Error', error.response?.data?.detail || 'Failed to send reminder');
+            } finally {
+              setSendingReminder(null);
+            }
+          }
+        }
+      ]
+    );
+  };
+
+  const markAsCleared = async (overdueId: string, memberName: string) => {
+    Alert.alert(
+      'Mark as Cleared',
+      `Mark ${memberName}'s overdue payment as cleared?`,
+      [
+        { text: 'Cancel', style: 'cancel' },
+        {
+          text: 'Confirm',
+          onPress: async () => {
+            try {
+              setMarkingCleared(overdueId);
+              const token = user?.token;
+              
+              await axios.post(
+                `${BACKEND_URL}/api/overdue/admin/mark-cleared/${overdueId}`,
+                {},
+                { headers: { Authorization: `Bearer ${token}` } }
+              );
+
+              Alert.alert('Success', 'Overdue marked as cleared');
+              await loadData();
+            } catch (error: any) {
+              console.error('Error marking cleared:', error);
+              Alert.alert('Error', error.response?.data?.detail || 'Failed to mark as cleared');
+            } finally {
+              setMarkingCleared(null);
+            }
+          }
+        }
+      ]
+    );
+  };
+
+  const runScan = async () => {
+    Alert.alert(
+      'Scan Overdue Payments',
+      'This will scan all members and detect new overdue payments. Continue?',
+      [
+        { text: 'Cancel', style: 'cancel' },
+        {
+          text: 'Scan',
+          onPress: async () => {
+            try {
+              setLoading(true);
+              const token = user?.token;
+              
+              const response = await axios.post(
+                `${BACKEND_URL}/api/overdue/scan`,
+                {},
+                { headers: { Authorization: `Bearer ${token}` } }
+              );
+
+              Alert.alert(
+                'Scan Complete',
+                `Found ${response.data.total_overdues} overdue payments\nInserted: ${response.data.inserted}\nUpdated: ${response.data.updated}`
+              );
+              await loadData();
+            } catch (error: any) {
+              console.error('Error scanning:', error);
+              Alert.alert('Error', 'Failed to scan overdue payments');
+            } finally {
+              setLoading(false);
+            }
+          }
+        }
+      ]
+    );
+  };
+
+  const formatCurrency = (amount: number) => {
+    return `₹${amount.toLocaleString('en-IN', { minimumFractionDigits: 2 })}`;
+  };
+
+  const formatDate = (dateString: string) => {
+    const date = new Date(dateString);
+    return date.toLocaleDateString('en-IN', { day: '2-digit', month: 'short', year: 'numeric' });
+  };
+
+  if (loading) {
+    return (
+      <View style={[styles.container, { backgroundColor: colors.background }]}>
+        <View style={[styles.header, { backgroundColor: colors.primary }]}>
+          <TouchableOpacity onPress={() => router.back()} style={styles.backButton}>
+            <Ionicons name="arrow-back" size={24} color="#fff" />
+          </TouchableOpacity>
+          <Text style={styles.headerTitle}>Overdue Management</Text>
+        </View>
+        <View style={styles.loadingContainer}>
+          <ActivityIndicator size="large" color={colors.primary} />
+        </View>
+      </View>
+    );
+  }
+
+  return (
+    <View style={[styles.container, { backgroundColor: colors.background }]}>
+      {/* Header */}
+      <View style={[styles.header, { backgroundColor: colors.primary }]}>
+        <TouchableOpacity onPress={() => router.back()} style={styles.backButton}>
+          <Ionicons name="arrow-back" size={24} color="#fff" />
+        </TouchableOpacity>
+        <Text style={styles.headerTitle}>Overdue Management</Text>
+        <TouchableOpacity onPress={() => router.push('/contributions/admin-overdue-stats')} style={styles.statsButton}>
+          <Ionicons name="stats-chart" size={24} color="#fff" />
+        </TouchableOpacity>
+      </View>
+
+      <ScrollView
+        style={styles.scrollView}
+        refreshControl={<RefreshControl refreshing={refreshing} onRefresh={onRefresh} colors={[colors.primary]} />}
+      >
+        {/* Stats Cards */}
+        {stats && (
+          <View style={styles.statsContainer}>
+            <View style={[styles.statCard, { backgroundColor: colors.card }]}>
+              <Ionicons name="people" size={20} color="#d32f2f" />
+              <Text style={[styles.statValue, { color: colors.text }]}>{stats.total_overdue_members}</Text>
+              <Text style={[styles.statLabel, { color: colors.textSecondary }]}>Overdue Members</Text>
+            </View>
+
+            <View style={[styles.statCard, { backgroundColor: colors.card }]}>
+              <Ionicons name="cash" size={20} color="#ff9800" />
+              <Text style={[styles.statValue, { color: colors.text }]}>{formatCurrency(stats.total_overdue_amount)}</Text>
+              <Text style={[styles.statLabel, { color: colors.textSecondary }]}>Total Amount</Text>
+            </View>
+
+            <View style={[styles.statCard, { backgroundColor: colors.card }]}>
+              <Ionicons name="time" size={20} color="#9c27b0" />
+              <Text style={[styles.statValue, { color: colors.text }]}>{stats.longest_overdue_days}d</Text>
+              <Text style={[styles.statLabel, { color: colors.textSecondary }]}>Longest Overdue</Text>
+            </View>
+
+            <View style={[styles.statCard, { backgroundColor: colors.card }]}>
+              <Ionicons name="checkmark-circle" size={20} color="#4caf50" />
+              <Text style={[styles.statValue, { color: colors.text }]}>{stats.recently_cleared_count}</Text>
+              <Text style={[styles.statLabel, { color: colors.textSecondary }]}>Recently Cleared</Text>
+            </View>
+          </View>
+        )}
+
+        {/* Scan Button */}
+        <TouchableOpacity
+          style={[styles.scanButton, { backgroundColor: colors.primary }]}
+          onPress={runScan}
+        >
+          <Ionicons name="scan" size={20} color="#fff" />
+          <Text style={styles.scanButtonText}>Scan for Overdue Payments</Text>
+        </TouchableOpacity>
+
+        {/* Search */}
+        <View style={[styles.searchContainer, { backgroundColor: colors.card }]}>
+          <Ionicons name="search" size={20} color={colors.textSecondary} />
+          <TextInput
+            style={[styles.searchInput, { color: colors.text }]}
+            value={searchQuery}
+            onChangeText={setSearchQuery}
+            placeholder="Search by name, ID, or email..."
+            placeholderTextColor={colors.textSecondary}
+          />
+        </View>
+
+        {/* Type Filter */}
+        <View style={styles.filterContainer}>
+          <TouchableOpacity
+            style={[styles.filterChip, filterType === 'all' && { backgroundColor: colors.primary }]}
+            onPress={() => setFilterType('all')}
+          >
+            <Text style={[styles.filterText, filterType === 'all' && { color: '#fff' }]}>All</Text>
+          </TouchableOpacity>
+          <TouchableOpacity
+            style={[styles.filterChip, filterType === 'Educational' && { backgroundColor: colors.primary }]}
+            onPress={() => setFilterType('Educational')}
+          >
+            <Text style={[styles.filterText, filterType === 'Educational' && { color: '#fff' }]}>Educational</Text>
+          </TouchableOpacity>
+          <TouchableOpacity
+            style={[styles.filterChip, filterType === 'Welfare' && { backgroundColor: colors.primary }]}
+            onPress={() => setFilterType('Welfare')}
+          >
+            <Text style={[styles.filterText, filterType === 'Welfare' && { color: '#fff' }]}>Welfare</Text>
+          </TouchableOpacity>
+        </View>
+
+        {/* Overdue List */}
+        <View style={styles.listContainer}>
+          <Text style={[styles.listTitle, { color: colors.text }]}>
+            Overdue Records ({filteredOverdues.length})
+          </Text>
+
+          {filteredOverdues.length === 0 ? (
+            <View style={styles.emptyContainer}>
+              <Ionicons name="checkmark-circle" size={64} color="#4caf50" />
+              <Text style={[styles.emptyText, { color: colors.text }]}>No Overdue Payments</Text>
+            </View>
+          ) : (
+            filteredOverdues.map((overdue) => (
+              <View key={overdue.id} style={[styles.overdueCard, { backgroundColor: colors.card }]}>
+                <View style={styles.cardHeader}>
+                  <View style={styles.memberInfo}>
+                    <Text style={[styles.memberName, { color: colors.text }]}>{overdue.member_name}</Text>
+                    <Text style={[styles.memberId, { color: colors.textSecondary }]}>
+                      {overdue.member_id} • {overdue.email}
+                    </Text>
+                  </View>
+                  <View style={[styles.daysOverdueBadge, { backgroundColor: '#d32f2f20' }]}>
+                    <Text style={[styles.daysOverdueText, { color: '#d32f2f' }]}>
+                      {overdue.days_overdue}d
+                    </Text>
+                  </View>
+                </View>
+
+                <View style={styles.cardDetails}>
+                  <View style={styles.detailRow}>
+                    <Ionicons name="bookmark" size={14} color={colors.textSecondary} />
+                    <Text style={[styles.detailLabel, { color: colors.textSecondary }]}>Type:</Text>
+                    <Text style={[styles.detailValue, { color: colors.text }]}>{overdue.overdue_type}</Text>
+                  </View>
+
+                  <View style={styles.detailRow}>
+                    <Ionicons name="cash" size={14} color={colors.textSecondary} />
+                    <Text style={[styles.detailLabel, { color: colors.textSecondary }]}>Amount:</Text>
+                    <Text style={[styles.detailValue, { color: colors.primary }]}>
+                      {formatCurrency(overdue.due_amount)}
+                    </Text>
+                  </View>
+
+                  <View style={styles.detailRow}>
+                    <Ionicons name="time" size={14} color={colors.textSecondary} />
+                    <Text style={[styles.detailLabel, { color: colors.textSecondary }]}>Overdue Since:</Text>
+                    <Text style={[styles.detailValue, { color: colors.text }]}>
+                      {formatDate(overdue.overdue_since)}
+                    </Text>
+                  </View>
+
+                  {overdue.reminder_count > 0 && (
+                    <View style={styles.detailRow}>
+                      <Ionicons name="notifications" size={14} color={colors.textSecondary} />
+                      <Text style={[styles.detailLabel, { color: colors.textSecondary }]}>Reminders Sent:</Text>
+                      <Text style={[styles.detailValue, { color: colors.text }]}>{overdue.reminder_count}</Text>
+                    </View>
+                  )}
+                </View>
+
+                <View style={styles.cardActions}>
+                  <TouchableOpacity
+                    style={[styles.actionButton, { backgroundColor: '#ff9800' }]}
+                    onPress={() => sendReminder(overdue.id, overdue.member_name)}
+                    disabled={sendingReminder === overdue.id}
+                  >
+                    {sendingReminder === overdue.id ? (
+                      <ActivityIndicator size="small" color="#fff" />
+                    ) : (
+                      <>
+                        <Ionicons name="notifications" size={16} color="#fff" />
+                        <Text style={styles.actionButtonText}>Remind</Text>
+                      </>
+                    )}
+                  </TouchableOpacity>
+
+                  <TouchableOpacity
+                    style={[styles.actionButton, { backgroundColor: '#4caf50' }]}
+                    onPress={() => markAsCleared(overdue.id, overdue.member_name)}
+                    disabled={markingCleared === overdue.id}
+                  >
+                    {markingCleared === overdue.id ? (
+                      <ActivityIndicator size="small" color="#fff" />
+                    ) : (
+                      <>
+                        <Ionicons name="checkmark-done" size={16} color="#fff" />
+                        <Text style={styles.actionButtonText}>Mark Cleared</Text>
+                      </>
+                    )}
+                  </TouchableOpacity>
+                </View>
+              </View>
+            ))
+          )}
+        </View>
+      </ScrollView>
+    </View>
+  );
+}
+
+const styles = StyleSheet.create({
+  container: {
+    flex: 1
+  },
+  header: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    justifyContent: 'space-between',
+    paddingTop: Platform.OS === 'ios' ? 50 : 40,
+    paddingBottom: 16,
+    paddingHorizontal: 16
+  },
+  backButton: {
+    padding: 4
+  },
+  statsButton: {
+    padding: 4
+  },
+  headerTitle: {
+    fontSize: 20,
+    fontWeight: 'bold',
+    color: '#fff',
+    flex: 1,
+    textAlign: 'center'
+  },
+  scrollView: {
+    flex: 1
+  },
+  loadingContainer: {
+    flex: 1,
+    justifyContent: 'center',
+    alignItems: 'center'
+  },
+  statsContainer: {
+    flexDirection: 'row',
+    flexWrap: 'wrap',
+    padding: 16,
+    gap: 12
+  },
+  statCard: {
+    flex: 1,
+    minWidth: 150,
+    padding: 12,
+    borderRadius: 8,
+    alignItems: 'center',
+    ...Platform.select({
+      ios: {
+        shadowColor: '#000',
+        shadowOffset: { width: 0, height: 2 },
+        shadowOpacity: 0.1,
+        shadowRadius: 4
+      },
+      android: {
+        elevation: 3
+      }
+    })
+  },
+  statValue: {
+    fontSize: 18,
+    fontWeight: 'bold',
+    marginTop: 4
+  },
+  statLabel: {
+    fontSize: 11,
+    marginTop: 2,
+    textAlign: 'center'
+  },
+  scanButton: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    justifyContent: 'center',
+    marginHorizontal: 16,
+    marginBottom: 16,
+    padding: 14,
+    borderRadius: 8,
+    gap: 8
+  },
+  scanButtonText: {
+    color: '#fff',
+    fontSize: 15,
+    fontWeight: '600'
+  },
+  searchContainer: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    marginHorizontal: 16,
+    marginBottom: 12,
+    padding: 12,
+    borderRadius: 8,
+    gap: 8
+  },
+  searchInput: {
+    flex: 1,
+    fontSize: 14
+  },
+  filterContainer: {
+    flexDirection: 'row',
+    paddingHorizontal: 16,
+    marginBottom: 16,
+    gap: 8
+  },
+  filterChip: {
+    paddingVertical: 8,
+    paddingHorizontal: 12,
+    borderRadius: 16,
+    borderWidth: 1,
+    borderColor: '#ddd'
+  },
+  filterText: {
+    fontSize: 13,
+    fontWeight: '500',
+    color: '#666'
+  },
+  listContainer: {
+    padding: 16
+  },
+  listTitle: {
+    fontSize: 16,
+    fontWeight: 'bold',
+    marginBottom: 12
+  },
+  emptyContainer: {
+    alignItems: 'center',
+    paddingVertical: 48
+  },
+  emptyText: {
+    fontSize: 16,
+    marginTop: 16
+  },
+  overdueCard: {
+    padding: 12,
+    borderRadius: 8,
+    marginBottom: 12,
+    ...Platform.select({
+      ios: {
+        shadowColor: '#000',
+        shadowOffset: { width: 0, height: 1 },
+        shadowOpacity: 0.1,
+        shadowRadius: 2
+      },
+      android: {
+        elevation: 2
+      }
+    })
+  },
+  cardHeader: {
+    flexDirection: 'row',
+    justifyContent: 'space-between',
+    alignItems: 'flex-start',
+    marginBottom: 8
+  },
+  memberInfo: {
+    flex: 1
+  },
+  memberName: {
+    fontSize: 15,
+    fontWeight: '600'
+  },
+  memberId: {
+    fontSize: 12,
+    marginTop: 2
+  },
+  daysOverdueBadge: {
+    paddingHorizontal: 10,
+    paddingVertical: 4,
+    borderRadius: 12
+  },
+  daysOverdueText: {
+    fontSize: 13,
+    fontWeight: 'bold'
+  },
+  cardDetails: {
+    gap: 6,
+    marginBottom: 12
+  },
+  detailRow: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    gap: 8
+  },
+  detailLabel: {
+    fontSize: 13,
+    width: 110
+  },
+  detailValue: {
+    fontSize: 13,
+    fontWeight: '500',
+    flex: 1
+  },
+  cardActions: {
+    flexDirection: 'row',
+    gap: 8
+  },
+  actionButton: {
+    flex: 1,
+    flexDirection: 'row',
+    alignItems: 'center',
+    justifyContent: 'center',
+    padding: 10,
+    borderRadius: 6,
+    gap: 6
+  },
+  actionButtonText: {
+    fontSize: 13,
+    fontWeight: '600',
+    color: '#fff'
+  }
+});
