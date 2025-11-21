@@ -39,3 +39,5 @@ yarn-error.*
 app-example
 .env
 .env.local
+.metro-cache/
+package-lock.json
